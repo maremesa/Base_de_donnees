@@ -299,10 +299,6 @@ Preview:
 Bioinformatics Engineer  
 Hospices Civils de Lyon (HCL)
 
-## Jean‑Philippe Rasigade
-
-Professor of Microbiology  
-Hospices Civils de Lyon (HCL)
 
 ---
 
@@ -310,7 +306,7 @@ Hospices Civils de Lyon (HCL)
 
 If you use this project, please cite:
 
-SARR M., Rasigade J.P.
+SARR M.
 BHRe Genomic Database and Dashboard.
 Hospices Civils de Lyon.
 
