@@ -164,14 +164,14 @@ Expected file:
 ```text
 BD_BHRe/
 │
-├── SAMPLE_001/
+├── 025138498903-02/
 │   ├── amrfinder/
 │   ├── mlst/
 │   ├── mob_recon/
 │   ├── prokka/
 │   └── quast/
 │
-├── SAMPLE_002/
+├── 025093175101-02/
 │
 └── ...
 ```
