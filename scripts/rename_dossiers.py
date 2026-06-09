@@ -1,139 +1,319 @@
 from pathlib import Path
+
 import pandas as pd
 
 
-def charger_mapping(fichier_tableau):
-    ext = Path(fichier_tableau).suffix.lower()
+"""
+Rename and move genome sample folders using a SAMPLE_ID-to-GLIMS mapping table.
 
-    if ext == ".csv":
-        df = pd.read_csv(fichier_tableau, dtype=str)
-    elif ext in [".xlsx", ".xls"]:
-        df = pd.read_excel(fichier_tableau, dtype=str)
+This script reads a mapping table containing at least two columns:
+
+    SAMPLE_ID | GLIMS
+
+It then scans a parent directory containing genome sample folders, converts
+folder names based on the mapping, renames files inside each folder when their
+names start with the old folder name, and finally moves the renamed folders to
+a destination directory.
+
+The script supports sample names with suffixes such as:
+
+    Epi-1      -> base: Epi-1, suffix: ""
+    Epi-1-A    -> base: Epi-1, suffix: "-A"
+    Epi-1-B    -> base: Epi-1, suffix: "-B"
+
+Example
+-------
+If the mapping table contains:
+
+    SAMPLE_ID = Epi-1
+    GLIMS     = 023064521501
+
+Then:
+
+    Epi-1-A -> 023064521501-A
+
+Main workflow
+-------------
+1. Load the SAMPLE_ID-to-GLIMS mapping from CSV or Excel.
+2. Scan all folders in the source directory.
+3. Extract the base sample name and optional suffix.
+4. Build the new folder name using the GLIMS identifier.
+5. Rename files inside the folder if they start with the old folder name.
+6. Move the folder to the destination directory.
+
+Author
+------
+Mareme SARR
+Bioinformatics Engineer
+Hospices Civils de Lyon
+"""
+
+
+# ============================================================================
+# Mapping utilities
+# ============================================================================
+
+def load_mapping(mapping_file):
+    """
+    Load the SAMPLE_ID-to-GLIMS mapping from a CSV or Excel file.
+
+    The input table must contain the columns `SAMPLE_ID` and `GLIMS`.
+    Empty values and textual missing values such as "nan" are removed.
+
+    Parameters
+    ----------
+    mapping_file : str | pathlib.Path
+        Path to the CSV, XLSX, or XLS mapping file.
+
+    Returns
+    -------
+    dict[str, str]
+        Dictionary mapping SAMPLE_ID values to GLIMS identifiers.
+
+    Raises
+    ------
+    ValueError
+        If the file format is unsupported or required columns are missing.
+    """
+    mapping_file = Path(mapping_file)
+    extension = mapping_file.suffix.lower()
+
+    if extension == ".csv":
+        df = pd.read_csv(mapping_file, dtype=str)
+    elif extension in [".xlsx", ".xls"]:
+        df = pd.read_excel(mapping_file, dtype=str)
     else:
-        raise ValueError("Format non supporté.")
+        raise ValueError("Unsupported file format. Use CSV, XLSX, or XLS.")
 
     df.columns = df.columns.str.strip()
 
     if "SAMPLE_ID" not in df.columns:
-        raise ValueError("Colonne SAMPLE_ID absente")
+        raise ValueError("Missing required column: SAMPLE_ID")
+
     if "GLIMS" not in df.columns:
-        raise ValueError("Colonne GLIMS absente")
+        raise ValueError("Missing required column: GLIMS")
 
     df["SAMPLE_ID"] = df["SAMPLE_ID"].astype(str).str.strip()
     df["GLIMS"] = df["GLIMS"].astype(str).str.strip()
 
     df = df[
-        (df["SAMPLE_ID"] != "") &
-        (df["GLIMS"] != "") &
-        (df["SAMPLE_ID"].str.lower() != "nan") &
-        (df["GLIMS"].str.lower() != "nan")
+        (df["SAMPLE_ID"] != "")
+        & (df["GLIMS"] != "")
+        & (df["SAMPLE_ID"].str.lower() != "nan")
+        & (df["GLIMS"].str.lower() != "nan")
     ]
 
     return dict(zip(df["SAMPLE_ID"], df["GLIMS"]))
 
 
-def extraire_base_suffixe(nom):
+# ============================================================================
+# Naming utilities
+# ============================================================================
+
+def extract_base_suffix(name):
     """
-    Exemples :
-      Epi-1      -> ("Epi-1", "")
-      Epi-1-A    -> ("Epi-1", "-A")
-      Epi-1-B    -> ("Epi-1", "-B")
+    Split a sample folder name into base sample name and suffix.
+
+    The expected naming pattern is based on hyphen-separated identifiers.
+    The first two parts define the base sample name, and all remaining parts
+    are treated as the suffix.
+
+    Examples
+    --------
+    Epi-1
+        -> ("Epi-1", "")
+
+    Epi-1-A
+        -> ("Epi-1", "-A")
+
+    Epi-1-B
+        -> ("Epi-1", "-B")
+
+    Parameters
+    ----------
+    name : str
+        Original folder name.
+
+    Returns
+    -------
+    tuple[str, str]
+        Base sample name and suffix.
     """
-    morceaux = nom.split("-")
+    parts = name.split("-")
 
-    if len(morceaux) <= 2:
-        return nom, ""
+    if len(parts) <= 2:
+        return name, ""
 
-    base = "-".join(morceaux[:2])   # Epi-1
-    suffixe = "-" + "-".join(morceaux[2:])  # -A ou -B
+    base = "-".join(parts[:2])
+    suffix = "-" + "-".join(parts[2:])
 
-    return base, suffixe
+    return base, suffix
 
 
-def renommer_fichiers_dans_dossier(dossier, ancien_nom, nouveau_nom, dry_run=True):
-    for item in dossier.iterdir():
+# ============================================================================
+# File and folder operations
+# ============================================================================
+
+def rename_files_in_folder(folder, old_name, new_name, dry_run=True):
+    """
+    Rename files inside a folder when their names start with the old sample name.
+
+    Only regular files are considered. Subdirectories are ignored.
+
+    Parameters
+    ----------
+    folder : str | pathlib.Path
+        Folder containing files to rename.
+
+    old_name : str
+        Prefix to replace in file names.
+
+    new_name : str
+        New prefix to use in file names.
+
+    dry_run : bool, optional
+        If True, only print planned operations without modifying files.
+        If False, files are actually renamed.
+
+    Returns
+    -------
+    None
+    """
+    folder = Path(folder)
+
+    for item in folder.iterdir():
         if not item.is_file():
             continue
 
-        ancien_fichier = item.name
+        old_file_name = item.name
 
-        if not ancien_fichier.startswith(ancien_nom):
-            print(f"   [SKIP] {ancien_fichier}")
+        if not old_file_name.startswith(old_name):
+            print(f"   [SKIP] {old_file_name}")
             continue
 
-        nouveau_fichier = nouveau_nom + ancien_fichier[len(ancien_nom):]
-        nouveau_chemin = dossier / nouveau_fichier
+        new_file_name = new_name + old_file_name[len(old_name):]
+        new_path = folder / new_file_name
 
-        if nouveau_chemin.exists():
-            print(f"   [CONFLIT] {nouveau_fichier} existe déjà")
+        if new_path.exists():
+            print(f"   [CONFLICT] {new_file_name} already exists")
             continue
 
-        print(f"   [FICHIER] {ancien_fichier} -> {nouveau_fichier}")
+        print(f"   [FILE] {old_file_name} -> {new_file_name}")
 
         if not dry_run:
-            item.rename(nouveau_chemin)
+            item.rename(new_path)
 
 
-def renommer_et_deplacer(dossier_parent, fichier_tableau, dossier_destination, dry_run=True):
-    dossier_parent = Path(dossier_parent)
-    dossier_destination = Path(dossier_destination)
+def rename_and_move_folders(
+    source_parent,
+    mapping_file,
+    destination_parent,
+    dry_run=True
+):
+    """
+    Rename genome sample folders using a mapping table and move them elsewhere.
 
-    mapping = charger_mapping(fichier_tableau)
+    For each folder in `source_parent`, the function extracts a base sample
+    identifier, looks it up in the SAMPLE_ID-to-GLIMS mapping, builds the new
+    folder name, renames matching files inside the folder, and moves the folder
+    to `destination_parent`.
+
+    Parameters
+    ----------
+    source_parent : str | pathlib.Path
+        Directory containing the original sample folders.
+
+    mapping_file : str | pathlib.Path
+        CSV or Excel file containing SAMPLE_ID and GLIMS columns.
+
+    destination_parent : str | pathlib.Path
+        Directory where renamed folders will be moved.
+
+    dry_run : bool, optional
+        If True, print planned operations without modifying the filesystem.
+        If False, perform the file renaming and folder moving.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    FileNotFoundError
+        If the source directory does not exist.
+
+    ValueError
+        If the mapping file is invalid or missing required columns.
+    """
+    source_parent = Path(source_parent)
+    destination_parent = Path(destination_parent)
+
+    if not source_parent.exists():
+        raise FileNotFoundError(f"Source directory not found: {source_parent}")
+
+    mapping = load_mapping(mapping_file)
 
     if not dry_run:
-        dossier_destination.mkdir(parents=True, exist_ok=True)
+        destination_parent.mkdir(parents=True, exist_ok=True)
 
-    for dossier in dossier_parent.iterdir():
-        if not dossier.is_dir():
+    for folder in source_parent.iterdir():
+        if not folder.is_dir():
             continue
 
-        ancien_nom = dossier.name
-        base, suffixe = extraire_base_suffixe(ancien_nom)
+        old_name = folder.name
+        base, suffix = extract_base_suffix(old_name)
 
         if base not in mapping:
-            print(f"[SKIP] {ancien_nom} (base {base} non trouvée)")
+            print(f"[SKIP] {old_name} - base {base} not found in mapping")
             continue
 
         glims = mapping[base]
 
         if not glims or glims.lower() == "nan":
-            print(f"[SKIP] {ancien_nom} GLIMS vide")
+            print(f"[SKIP] {old_name} - empty GLIMS value")
             continue
 
-        nouveau_nom = glims + suffixe
-        nouveau_dossier = dossier_destination / nouveau_nom
+        new_name = glims + suffix
+        new_folder = destination_parent / new_name
 
-        print(f"\n[DOSSIER] {ancien_nom} -> {nouveau_nom}")
+        print(f"\n[FOLDER] {old_name} -> {new_name}")
 
-        #  renommer fichiers
-        renommer_fichiers_dans_dossier(
-            dossier, ancien_nom, nouveau_nom, dry_run
+        rename_files_in_folder(
+            folder=folder,
+            old_name=old_name,
+            new_name=new_name,
+            dry_run=dry_run
         )
 
-        #  déplacer dossier
-        if nouveau_dossier.exists():
-            print(f"[CONFLIT DOSSIER] {nouveau_nom} existe déjà")
+        if new_folder.exists():
+            print(f"[FOLDER CONFLICT] {new_name} already exists")
             continue
 
-        print(f"[MOVE] {dossier} -> {nouveau_dossier}")
+        print(f"[MOVE] {folder} -> {new_folder}")
 
         if not dry_run:
-            dossier.rename(nouveau_dossier)
+            folder.rename(new_folder)
 
     if dry_run:
-        print("\n Mode test désactivé")
+        print("\nDry-run mode enabled: no files or folders were modified.")
 
+
+# ============================================================================
+# Script entry point
+# ============================================================================
 
 if __name__ == "__main__":
-    dossier_parent = "/data/msarr/BD_genomes"
-    fichier_tableau = "/data/msarr/Metadata_eq_rasigade.xlsx"
-    dossier_destination = "/data/msarr/BD_BHRe"
+    source_parent = "/data/msarr/BD_genomes"
+    mapping_file = "/data/msarr/Metadata_eq_rasigade.xlsx"
+    destination_parent = "/data/msarr/BD_BHRe"
 
-    dry_run = False  # tester d'abord avec True à la place 
+    # Set to True first to preview all planned changes safely.
+    # Set to False only after verifying the output.
+    dry_run = False
 
-    renommer_et_deplacer(
-        dossier_parent,
-        fichier_tableau,
-        dossier_destination,
-        dry_run
+    rename_and_move_folders(
+        source_parent=source_parent,
+        mapping_file=mapping_file,
+        destination_parent=destination_parent,
+        dry_run=dry_run
     )
