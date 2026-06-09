@@ -246,7 +246,7 @@ streamlit run dashboard_bhre.py
 
 Default address:
 
-http://localhost:8501
+http://10.7.81.30:8501
 
 ---
 
