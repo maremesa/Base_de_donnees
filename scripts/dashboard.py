@@ -1,3 +1,33 @@
+"""
+BHRe Genomics Dashboard
+=======================
+
+Streamlit application used to explore a hospital genomics database dedicated to
+BHRe/BMR isolates. The dashboard provides interactive access to sequencing
+samples, MLST results, antimicrobial resistance hits, plasmid reconstruction,
+assembly quality metrics, Prokka annotations, clinical metadata, and associated
+bioinformatics files.
+
+The application connects to a local PostgreSQL database and displays the results
+through multiple Streamlit tabs. The user interface is mostly in French because
+it is intended for local clinical and bioinformatics users, while the Python
+source documentation is written in English for maintainability and reuse.
+
+Main features
+-------------
+- Global overview of samples and database content.
+- Sample-level detail page combining all available result tables.
+- Search and filtering by sample ID, clinical ID, species, AMR gene, Prokka gene,
+  plasmid mobility, clinical cluster, and sampling type.
+- Interactive tables and charts for MLST, AMR, plasmids, QUAST, Prokka, clinical
+  data, and files.
+- File preview for supported text, HTML, and PDF files.
+
+Author
+------
+Mareme SARR, Bioinformatics Engineer, Hospices Civils de Lyon.
+"""
+
 from pathlib import Path
 import base64
 
@@ -57,17 +87,67 @@ CLINICAL_ORDER_SQL = """
 
 @st.cache_resource
 def get_conn():
+    """Create and cache a PostgreSQL database connection.
+
+    The connection settings are read from the global ``DB_CONFIG`` dictionary.
+    Streamlit caches the connection as a resource so that the application does
+    not open a new database connection each time the script is rerun.
+
+    Returns
+    -------
+    psycopg2.extensions.connection
+        Active PostgreSQL connection used by the dashboard.
+    """
     return psycopg2.connect(**DB_CONFIG)
 
 
 @st.cache_data(ttl=300)
 def run_query(query: str, params=None) -> pd.DataFrame:
+    """Run a SQL query and return the result as a pandas DataFrame.
+
+    Query results are cached for 300 seconds to reduce repeated database calls
+    during Streamlit reruns and while users interact with filters.
+
+    Parameters
+    ----------
+    query : str
+        SQL query to execute. The query may contain placeholders compatible with
+        ``psycopg2`` parameter binding.
+    params : list, tuple, or None, optional
+        Parameters passed to the SQL query.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Query result table.
+    """
     conn = get_conn()
     return pd.read_sql(query, conn, params=params)
 
 
 @st.cache_data(ttl=300)
 def read_text_file(path_str: str, max_chars: int = MAX_FILE_PREVIEW_CHARS):
+    """Read a supported text file for preview in the dashboard.
+
+    The function validates that the path exists, rejects unsupported file types,
+    and limits the amount of text loaded into memory. Compressed FASTQ files are
+    deliberately excluded because they are usually too large for interactive
+    preview.
+
+    Parameters
+    ----------
+    path_str : str
+        Absolute path to the file to preview.
+    max_chars : int, optional
+        Maximum number of characters to read from the file.
+
+    Returns
+    -------
+    dict
+        Dictionary with ``ok`` set to True and ``content`` when reading
+        succeeds. On failure, ``ok`` is False and ``error`` contains the reason.
+        The optional ``truncated`` flag indicates whether the preview was cut.
+    """
     path = Path(path_str)
 
     if not path.exists():
@@ -97,6 +177,18 @@ def read_text_file(path_str: str, max_chars: int = MAX_FILE_PREVIEW_CHARS):
 
 @st.cache_data(ttl=300)
 def read_html_file(path_str: str):
+    """Read an HTML file for rendering inside Streamlit.
+
+    Parameters
+    ----------
+    path_str : str
+        Absolute path to the HTML file.
+
+    Returns
+    -------
+    dict
+        Dictionary containing either the HTML content or an error message.
+    """
     path = Path(path_str)
 
     if not path.exists():
@@ -114,6 +206,18 @@ def read_html_file(path_str: str):
 
 @st.cache_data(ttl=300)
 def get_logo_base64():
+    """Load the HCL logo and encode it as Base64.
+
+    Several candidate paths are tested to support both local development and
+    deployment on the laboratory server.
+
+    Returns
+    -------
+    dict
+        Dictionary containing ``ok``, the Base64 ``content``, and the MIME type
+        when the logo is found. If no logo is available, an error message is
+        returned.
+    """
     for path in HCL_LOGO_CANDIDATES:
         if path.exists() and path.is_file():
             try:
@@ -125,6 +229,18 @@ def get_logo_base64():
 
 
 def fmt_int(x):
+    """Format an integer-like value with spaces as thousands separators.
+
+    Parameters
+    ----------
+    x : object
+        Value to format.
+
+    Returns
+    -------
+    str
+        Human-readable representation of the value.
+    """
     try:
         return f"{int(x):,}".replace(",", " ")
     except Exception:
@@ -132,6 +248,19 @@ def fmt_int(x):
 
 
 def normalize_sample_ids(values):
+    """Clean, deduplicate, and preserve the order of sample identifiers.
+
+    Parameters
+    ----------
+    values : iterable
+        Raw sample identifiers, possibly containing nulls, empty strings, or
+        duplicates.
+
+    Returns
+    -------
+    list[str]
+        Ordered list of unique, non-empty sample identifiers.
+    """
     if not values:
         return []
     out = []
@@ -149,11 +278,28 @@ def normalize_sample_ids(values):
 
 
 def clear_all_filters():
+    """Request a full reset of all dashboard filters.
+
+    The actual reset is performed during the next script run through the
+    ``reset_filters`` flag stored in ``st.session_state``.
+    """
     st.session_state.reset_filters = True
     st.rerun()
 
 
 def select_sample(sample_id: str, target_tab: str = "Fiche sample"):
+    """Select a sample and navigate to the requested tab.
+
+    This helper is mainly used from the file explorer to open the detailed sheet
+    of the sample associated with a selected file.
+
+    Parameters
+    ----------
+    sample_id : str
+        Sample identifier to select.
+    target_tab : str, optional
+        Name of the tab that should be displayed after selection.
+    """
     sample_id = str(sample_id).strip()
     st.session_state.selected_sample = sample_id
     st.session_state.active_tab = target_tab
@@ -164,6 +310,25 @@ def select_sample(sample_id: str, target_tab: str = "Fiche sample"):
 
 
 def apply_common_sample_filter(query, params, filtered_sample_ids, sample_column="sample_id"):
+    """Append a sample-ID filter to a SQL query when samples are selected.
+
+    Parameters
+    ----------
+    query : str
+        SQL query being constructed. It must already contain a ``WHERE`` clause
+        or be compatible with appending ``AND``.
+    params : list
+        Mutable list of SQL parameters associated with the query.
+    filtered_sample_ids : list[str]
+        Sample identifiers to retain.
+    sample_column : str, optional
+        SQL column name containing the sample identifier.
+
+    Returns
+    -------
+    tuple[str, list]
+        Updated SQL query and parameter list.
+    """
     if filtered_sample_ids:
         query += f" AND {sample_column} = ANY(%s)"
         params.append(filtered_sample_ids)
@@ -181,6 +346,37 @@ def get_filtered_sample_ids(
     cluster_filter,
     type_prelevement_filter,
 ):
+    """Return sample identifiers matching the active sidebar filters.
+
+    The function builds a dynamic SQL query over the union of all sample IDs
+    found in the main result tables. Additional ``EXISTS`` clauses are added for
+    clinical, AMR, Prokka, plasmid, and cluster-related filters.
+
+    Parameters
+    ----------
+    sample_search : str
+        Free-text search applied to ``sample_id``.
+    sample_epi_filter : str
+        Exact, case-insensitive filter on the clinical ``sample_epi`` field.
+    species_filter : str
+        Partial, case-insensitive species filter from clinical metadata.
+    gene_filter : str
+        Partial, case-insensitive AMR gene filter.
+    prokka_gene_filter : str
+        Partial, case-insensitive Prokka gene filter.
+    mobility_filter : str
+        Plasmid mobility category. The value ``"Toutes"`` disables the filter.
+    cluster_filter : str
+        Exact, case-insensitive clinical cluster identifier.
+    type_prelevement_filter : str
+        Exact, case-insensitive sampling type filter.
+
+    Returns
+    -------
+    tuple[list[str], str]
+        Matching sample identifiers and a readable description of the active
+        filters.
+    """
     clauses = []
     params = []
     labels = []
@@ -318,6 +514,18 @@ def detect_auto_tab(
     cluster_filter,
     type_prelevement_filter,
 ):
+    """Choose the most relevant tab after a filter change.
+
+    The function compares the current filter values with the values stored from
+    the previous Streamlit run. When a specific filter changes, the dashboard can
+    automatically switch to the tab where that filter is most meaningful.
+
+    Returns
+    -------
+    str or None
+        Name of the tab to open automatically, or ``None`` when no automatic
+        navigation is needed.
+    """
     previous_selected_sample = st.session_state.get("previous_selected_sample", "")
     previous_sample_epi_filter = st.session_state.get("previous_sample_epi_filter", "")
     previous_species_filter = st.session_state.get("previous_species_filter", "")
@@ -368,6 +576,23 @@ def detect_auto_tab(
 
 
 def show_sample_sheet(sample_id: str):
+    """Render the complete detail sheet for a single sample.
+
+    The sample sheet gathers information from the ``samples``, ``mlst_results``,
+    ``amrfinder_hits``, ``mob_recon_results``, ``quast_metrics``, ``files``, and
+    ``clinical_data`` tables. It displays summary metrics and detailed tables in
+    a two-column layout.
+
+    Parameters
+    ----------
+    sample_id : str
+        Identifier of the sample to display.
+
+    Returns
+    -------
+    None
+        The function writes directly to the Streamlit page.
+    """
     st.markdown(f"## 🧪 Fiche sample — `{sample_id}`")
 
     df_sample = run_query("""
@@ -497,6 +722,10 @@ def show_sample_sheet(sample_id: str):
         )
 
 
+# -----------------------------------------------------------------------------
+# Application styling
+# -----------------------------------------------------------------------------
+
 st.markdown("""
 <style>
 :root {
@@ -616,6 +845,10 @@ pre {
 </style>
 """, unsafe_allow_html=True)
 
+# -----------------------------------------------------------------------------
+# Session-state defaults and reset logic
+# -----------------------------------------------------------------------------
+
 DEFAULTS = {
     "selected_sample": "",
     "active_tab": "Vue d’ensemble",
@@ -664,6 +897,10 @@ if st.session_state.reset_filters:
     st.session_state.previous_type_prelevement_filter = ""
     st.session_state.reset_filters = False
 
+# -----------------------------------------------------------------------------
+# Header and branding
+# -----------------------------------------------------------------------------
+
 logo = get_logo_base64()
 
 left_hero, right_hero = st.columns([4.5, 1.3])
@@ -697,6 +934,10 @@ with right_hero:
             <div class="logo-caption">HCL Lyon</div>
         </div>
         """, unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# Sidebar filters
+# -----------------------------------------------------------------------------
 
 st.sidebar.header("Filtres")
 
@@ -823,6 +1064,10 @@ elif any([
 ]):
     st.warning("Aucune souche ne correspond aux filtres actuels.")
 
+# -----------------------------------------------------------------------------
+# Global KPIs
+# -----------------------------------------------------------------------------
+
 kpi_samples = run_query("SELECT COUNT(*) AS n FROM samples")
 kpi_files = run_query("SELECT COUNT(*) AS n FROM files")
 kpi_mlst = run_query("SELECT COUNT(*) AS n FROM mlst_results")
@@ -843,6 +1088,10 @@ c7.metric("QUAST", fmt_int(kpi_quast.iloc[0, 0]))
 c8.metric("Clinique", fmt_int(kpi_clinical.iloc[0, 0]))
 
 st.divider()
+
+# -----------------------------------------------------------------------------
+# Main tab navigation and tab-specific content
+# -----------------------------------------------------------------------------
 
 current_tab = st.radio(
     "Navigation",
@@ -1323,6 +1572,10 @@ elif current_tab == "Fichiers":
                 st.info(f"Prévisualisation non disponible pour l’extension `{extension or 'inconnue'}`.")
         else:
             st.info("Sélectionne un fichier dans la liste pour afficher son contenu.")
+
+# -----------------------------------------------------------------------------
+# Footer
+# -----------------------------------------------------------------------------
 
 st.markdown("""
 <div class="footer-box">
