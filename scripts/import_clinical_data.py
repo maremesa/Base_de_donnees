@@ -4,6 +4,30 @@ from datetime import date, datetime
 import pandas as pd
 import psycopg2
 
+
+"""
+Import clinical metadata into the BHRe PostgreSQL database.
+
+This script reads an Excel metadata file, standardizes its column names,
+cleans text, numeric and date values, then replaces the content of the
+`clinical_data` table with the cleaned records.
+
+Main steps
+----------
+1. Read the Excel file defined by `EXCEL_PATH`.
+2. Normalize column names.
+3. Validate that all expected columns are present.
+4. Clean dates, integers and text fields.
+5. Truncate the PostgreSQL `clinical_data` table.
+6. Insert all cleaned rows.
+7. Create useful indexes for querying by `glims` and `sample_id`.
+
+Author
+------
+Mareme SARR
+"""
+
+
 DB_CONFIG = {
     "dbname": "bd_bhre",
     "user": "msarr",
@@ -15,17 +39,67 @@ EXCEL_PATH = "/data/msarr/metadata.xlsx"
 
 
 def to_date(series: pd.Series) -> pd.Series:
+    """
+    Convert a pandas Series to Python date objects.
+
+    Invalid or missing values are converted to NaT first, then to null-like
+    date values compatible with PostgreSQL insertion.
+
+    Parameters
+    ----------
+    series : pandas.Series
+        Input column containing dates or date-like values.
+
+    Returns
+    -------
+    pandas.Series
+        Series containing Python `date` objects or missing values.
+    """
     return pd.to_datetime(series, errors="coerce").dt.date
 
 
 def clean_text(value):
+    """
+    Clean a text value before database insertion.
+
+    Missing values are converted to None. Non-empty values are converted to
+    strings and stripped of leading and trailing spaces.
+
+    Parameters
+    ----------
+    value : Any
+        Input value to clean.
+
+    Returns
+    -------
+    str | None
+        Cleaned string, or None if the value is missing or empty.
+    """
     if pd.isna(value):
         return None
+
     text = str(value).strip()
     return text if text else None
 
 
 def clean_scalar(value):
+    """
+    Clean a scalar value for PostgreSQL insertion.
+
+    This function converts pandas missing values to None and converts pandas
+    or Python datetime values to Python date objects. Other values are
+    returned unchanged.
+
+    Parameters
+    ----------
+    value : Any
+        Input scalar value.
+
+    Returns
+    -------
+    Any
+        Cleaned scalar value suitable for database insertion.
+    """
     if pd.isna(value):
         return None
 
@@ -42,12 +116,33 @@ def clean_scalar(value):
 
 
 def main():
-    path = Path(EXCEL_PATH)
-    if not path.exists():
-        raise FileNotFoundError(f"Fichier introuvable: {path}")
+    """
+    Run the clinical metadata import workflow.
 
+    The function loads the Excel metadata file, validates the expected schema,
+    cleans the dataframe and inserts the records into the PostgreSQL
+    `clinical_data` table.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the Excel metadata file does not exist.
+
+    ValueError
+        If one or more expected columns are missing from the Excel file.
+
+    psycopg2.Error
+        If an error occurs during the PostgreSQL transaction.
+    """
+    path = Path(EXCEL_PATH)
+
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    # Read metadata from Excel.
     df = pd.read_excel(path)
 
+    # Standardize column names to match the PostgreSQL table schema.
     df.columns = (
         df.columns
         .str.strip()
@@ -56,6 +151,7 @@ def main():
         .str.replace("-", "_", regex=False)
     )
 
+    # Remove automatically generated unnamed column if present.
     df = df.drop(columns=["unnamed:_34"], errors="ignore")
 
     expected_cols = [
@@ -95,16 +191,21 @@ def main():
         "cluster_rendu",
     ]
 
-    missing = [c for c in expected_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Colonnes manquantes dans l'Excel: {missing}")
+    missing = [col for col in expected_cols if col not in df.columns]
 
+    if missing:
+        raise ValueError(f"Missing columns in Excel file: {missing}")
+
+    # Keep only the expected columns and preserve their target order.
     df = df[expected_cols].copy()
 
+    # Convert integer-like columns.
     int_cols = ["ordre_chronologique"]
+
     for col in int_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # Convert date columns.
     date_cols = [
         "date_prelevement",
         "transplanting_date",
@@ -114,10 +215,13 @@ def main():
         "seq_nanopore_date_bis",
         "seq_nanopore_date_ter",
     ]
+
     for col in date_cols:
         df[col] = to_date(df[col])
 
-    text_cols = [c for c in df.columns if c not in int_cols + date_cols]
+    # Clean all remaining text columns.
+    text_cols = [col for col in df.columns if col not in int_cols + date_cols]
+
     for col in text_cols:
         df[col] = df[col].map(clean_text)
 
@@ -125,6 +229,7 @@ def main():
     cur = conn.cursor()
 
     try:
+        # Replace all existing clinical metadata.
         cur.execute("TRUNCATE TABLE clinical_data RESTART IDENTITY;")
 
         insert_sql = """
@@ -171,8 +276,13 @@ def main():
         """
 
         rows = []
+
         for _, row in df.iterrows():
-            ordre_val = None if pd.isna(row["ordre_chronologique"]) else int(row["ordre_chronologique"])
+            ordre_val = (
+                None
+                if pd.isna(row["ordre_chronologique"])
+                else int(row["ordre_chronologique"])
+            )
 
             rows.append((
                 clean_scalar(row["sample_id"]),
@@ -213,11 +323,20 @@ def main():
 
         cur.executemany(insert_sql, rows)
 
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_clinical_data_glims ON clinical_data(glims);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_clinical_data_sample_id ON clinical_data(sample_id);")
+        # Create indexes to improve query performance in the dashboard.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_clinical_data_glims "
+            "ON clinical_data(glims);"
+        )
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_clinical_data_sample_id "
+            "ON clinical_data(sample_id);"
+        )
 
         conn.commit()
-        print(f"Import terminé: {len(rows)} lignes insérées dans clinical_data.")
+
+        print(f"Import completed: {len(rows)} rows inserted into clinical_data.")
 
     except Exception:
         conn.rollback()
