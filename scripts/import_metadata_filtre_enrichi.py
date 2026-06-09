@@ -1,10 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Import enriched clinical metadata into the BHRe PostgreSQL database.
+
+This script loads an Excel spreadsheet containing epidemiological,
+clinical, sequencing, and laboratory metadata associated with BHRe
+samples. The data are cleaned, standardized, and inserted into the
+`clinical_data` table of the PostgreSQL database.
+
+Main workflow
+-------------
+1. Load the Excel metadata file.
+2. Rename Excel columns to match the database schema.
+3. Validate the expected structure.
+4. Clean text and date fields.
+5. Insert all records into PostgreSQL using batch insertion.
+6. Verify the final number of imported records.
+
+Author
+------
+Mareme SARR
+Bioinformatics Engineer
+Hospices Civils de Lyon (HCL)
+"""
+
 from pathlib import Path
+
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_batch
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
 
 FILE = Path("/data/msarr/metadata_filtre_enrichi.xlsx")
 
@@ -15,31 +45,104 @@ DB_CONFIG = {
     "port": 55432,
 }
 
+
+# ============================================================================
+# Data cleaning utilities
+# ============================================================================
+
 def clean_text(x):
+    """
+    Clean a text value before database insertion.
+
+    Missing values, empty strings, and textual representations of
+    missing values (e.g. "nan") are converted to None.
+
+    Parameters
+    ----------
+    x : Any
+        Input value.
+
+    Returns
+    -------
+    str | None
+        Cleaned string or None.
+    """
     if pd.isna(x):
         return None
+
     x = str(x).strip()
+
     if x == "" or x.lower() == "nan":
         return None
+
     return x
 
 
 def clean_date(x):
+    """
+    Convert a date-like value into a Python date object.
+
+    Invalid dates are converted to None.
+
+    Parameters
+    ----------
+    x : Any
+        Input date value.
+
+    Returns
+    -------
+    datetime.date | None
+        Parsed date or None if conversion fails.
+    """
     if pd.isna(x):
         return None
+
     dt = pd.to_datetime(x, errors="coerce")
+
     if pd.isna(dt):
         return None
+
     return dt.date()
 
 
-def main():
-    if not FILE.exists():
-        raise FileNotFoundError(f"Fichier introuvable : {FILE}")
+# ============================================================================
+# Main import workflow
+# ============================================================================
 
+def main():
+    """
+    Execute the metadata import pipeline.
+
+    The function loads the Excel metadata file, validates the schema,
+    cleans the dataset, and inserts all records into the PostgreSQL
+    `clinical_data` table using optimized batch insertion.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the Excel metadata file cannot be found.
+
+    ValueError
+        If required columns are missing.
+
+    psycopg2.Error
+        If a database error occurs during insertion.
+    """
+
+    # ------------------------------------------------------------------------
+    # Verify that the input file exists
+    # ------------------------------------------------------------------------
+    if not FILE.exists():
+        raise FileNotFoundError(f"File not found: {FILE}")
+
+    # ------------------------------------------------------------------------
+    # Load Excel metadata
+    # ------------------------------------------------------------------------
     df = pd.read_excel(FILE, dtype=str)
 
-    # Noms exacts du fichier -> noms SQL
+    # ------------------------------------------------------------------------
+    # Rename Excel column names to PostgreSQL-compatible names
+    # ------------------------------------------------------------------------
     df = df.rename(columns={
         "Sample_Epi": "sample_epi",
         "ordre chronologique": "ordre_chronologique",
@@ -79,6 +182,9 @@ def main():
         "Unnamed: 34": "unnamed_34",
     })
 
+    # ------------------------------------------------------------------------
+    # Expected schema validation
+    # ------------------------------------------------------------------------
     expected_cols = [
         "sample_epi",
         "ordre_chronologique",
@@ -118,9 +224,15 @@ def main():
     ]
 
     missing = [c for c in expected_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Colonnes manquantes dans le fichier Excel : {missing}")
 
+    if missing:
+        raise ValueError(
+            f"Missing columns in Excel file: {missing}"
+        )
+
+    # ------------------------------------------------------------------------
+    # Clean text columns
+    # ------------------------------------------------------------------------
     text_cols = [
         "sample_epi",
         "ordre_chronologique",
@@ -155,6 +267,9 @@ def main():
     for col in text_cols:
         df[col] = df[col].apply(clean_text)
 
+    # ------------------------------------------------------------------------
+    # Clean date columns
+    # ------------------------------------------------------------------------
     date_cols = [
         "date_prelevement",
         "transplanting_date",
@@ -168,8 +283,12 @@ def main():
     for col in date_cols:
         df[col] = df[col].apply(clean_date)
 
+    # Convert DataFrame to dictionaries for batch insertion.
     rows = df[expected_cols].to_dict(orient="records")
 
+    # ------------------------------------------------------------------------
+    # Database connection
+    # ------------------------------------------------------------------------
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
@@ -210,7 +329,8 @@ def main():
             rendu,
             cluster_rendu,
             unnamed_34
-        ) VALUES (
+        )
+        VALUES (
             %(sample_epi)s,
             %(ordre_chronologique)s,
             %(cluster_id)s,
@@ -249,16 +369,31 @@ def main():
         )
     """
 
-    execute_batch(cur, insert_sql, rows, page_size=1000)
+    # ------------------------------------------------------------------------
+    # Batch insertion
+    # ------------------------------------------------------------------------
+    execute_batch(
+        cur,
+        insert_sql,
+        rows,
+        page_size=1000
+    )
+
     conn.commit()
 
+    # ------------------------------------------------------------------------
+    # Import verification
+    # ------------------------------------------------------------------------
     cur.execute("SELECT COUNT(*) FROM clinical_data;")
     n = cur.fetchone()[0]
 
     cur.close()
     conn.close()
 
-    print(f"Import terminé : {n} lignes insérées dans clinical_data")
+    print(
+        f"Import completed successfully: "
+        f"{n} rows inserted into clinical_data."
+    )
 
 
 if __name__ == "__main__":
